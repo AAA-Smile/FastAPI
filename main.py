@@ -1,3 +1,6 @@
+import json
+from typing import Any
+
 from fastapi import FastAPI, Query, Path , HTTPException
 from fastapi.params import Depends
 from pydantic import BaseModel , Field
@@ -5,6 +8,7 @@ from fastapi.responses import HTMLResponse , FileResponse
 from sqlalchemy.ext.asyncio import create_async_engine , async_sessionmaker , AsyncSession
 from sqlalchemy.orm import DeclarativeBase , Mapped , mapped_column
 from sqlalchemy import DateTime, func , Float , String , select
+import redis.asyncio as redis
 
 #先创建FastAPI实例
 app = FastAPI()
@@ -408,4 +412,54 @@ async def delete_book(id : int , db : AsyncSession = Depends(get_db)):
 
 更新或删除后忘记 commit：
 如果你只写了 db.add() 或 db.delete()，没写 await db.commit()，关掉程序后数据根本没变。commit 是“保存”按钮，不按等于白干！
+"""
+
+#Redis缓存机制
+#首先我们先创建一个Redis连接对象，方便后续使用
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+REDIS_DB = 0
+
+redis_client = redis.Redis(
+    host=REDIS_HOST,  # Redis 服务器的主机地址
+    port=REDIS_PORT,  # Redis 端口号
+    db=REDIS_DB,  # Redis 数据库编号，0~15
+    decode_responses=True  # 是否将字节数据解码为字符串
+)
+
+#本质上Redis缓存存储的其实就是字典样式的数据，按照键值对的形式
+#下面定义一个写入缓存的函数
+@app.get("/cache")
+async def set_cache(key: str, value: Any, expire: int = 3600):
+    try:
+        #判断value变量属性是否为dict或者list
+        if isinstance(value, (dict, list)):
+            #如果是就得先转化为字符串再存
+            value = json.dumps(value, ensure_ascii=False)  # 中文正常保存
+        #将key的值设置为value，随后在expire秒后删除
+        await redis_client.setex(key, expire, value)
+        return True
+    except Exception as e:
+        print(f"设置缓存失败：{e}")
+        return False
+
+#那读取缓存呢，一般直接定义可适配读取列表或字典的样式
+@app.get('/cache1')
+async def get_json_cache(key : str):
+    try :
+        data = await redis_client.get(key)
+        if data :
+            #loads是读取数据，dumps是写入数据
+            return json.loads(data)
+        return None
+    except Exception as e :
+        print(f"获取 JSON 缓存失败：{e}")
+        return None
+
+"""
+第一次请求：
+用户 → 查缓存 → 没有 → 查数据库 → 写入缓存 → 返回数据
+
+第二次请求（30分钟内）：
+用户 → 查缓存 → 有！→ 直接返回（速度极快，不碰数据库）
 """
